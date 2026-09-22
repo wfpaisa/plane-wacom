@@ -60,11 +60,22 @@ How it works:
     never forwarded. A button assigned to panscroll simply stops being a
     click button, same as on X11.
 
+  Beyond plain proportional scrolling, a velocity-based acceleration curve
+  boosts fast drags disproportionately (like mouse pointer acceleration):
+  below a reference speed the motion is scaled 1:1 (unchanged), and above it
+  the effective distance gets multiplied by (velocity/reference)^exponent,
+  capped at a maximum multiplier - so slow, deliberate drags stay exactly as
+  precise as before, while a fast flick scrolls much further than a linear
+  mapping would give it.
+
 Config via environment variables (all optional):
   WACOM_PANSCROLL_DEVICE     device name to grab (default: "Wacom Intuos S Pen")
   WACOM_PANSCROLL_BUTTON     "stylus" or "stylus2" (default: "stylus2")
   WACOM_PANSCROLL_SENSITIVITY tablet units of motion per 120 hi-res scroll
                               units, i.e. per "notch" (default: 300; lower = faster)
+  WACOM_PANSCROLL_ACCEL      exponent of the speed-based acceleration curve
+                              (default: 1.6; 1.0 = no acceleration, linear)
+  WACOM_PANSCROLL_ACCEL_MAX  cap on the acceleration multiplier (default: 6.0)
   WACOM_PANSCROLL_INVERT_Y   "1" to invert vertical scroll direction
   WACOM_PANSCROLL_HSCROLL    "0" to disable horizontal scroll (vertical only)
 """
@@ -81,10 +92,16 @@ _BUTTON_MAP = {"stylus": ecodes.BTN_STYLUS, "stylus2": ecodes.BTN_STYLUS2}
 TRIGGER_BUTTON = _BUTTON_MAP[os.environ.get("WACOM_PANSCROLL_BUTTON", "stylus2")]
 
 SENSITIVITY = float(os.environ.get("WACOM_PANSCROLL_SENSITIVITY", "300"))
+ACCEL_EXPONENT = float(os.environ.get("WACOM_PANSCROLL_ACCEL", "1.6"))
+ACCEL_MAX = float(os.environ.get("WACOM_PANSCROLL_ACCEL_MAX", "6.0"))
 INVERT_Y = os.environ.get("WACOM_PANSCROLL_INVERT_Y", "0") == "1"
 HSCROLL_ENABLED = os.environ.get("WACOM_PANSCROLL_HSCROLL", "1") != "0"
 
 HI_RES_UNIT = 120  # libinput/kernel convention: 120 hi-res units == 1 legacy notch
+# Tablet units/sec below which motion is left unscaled (1x) - only drags
+# faster than this get the acceleration boost. ~40mm/s at this pen's 100
+# units/mm resolution: a calm, deliberate drag speed.
+ACCEL_REF_VELOCITY = 4000.0
 RETRY_SECONDS = 3
 
 # Synthetic identity for our virtual devices - deliberately NOT the real
@@ -159,13 +176,14 @@ class PanState:
         self.panning = False  # trigger button is held: committed to a pan gesture
         self.last_x = None
         self.last_y = None
+        self.last_t = None  # timestamp of the last processed frame, for velocity
         self.accum_hires_y = 0.0  # fractional hi-res units not yet emitted
         self.accum_hires_x = 0.0
         self.legacy_carry_y = 0  # hi-res units emitted but not yet folded into a legacy notch
         self.legacy_carry_x = 0
 
 
-def process_frame(frame, ui, scroll_dev, state):
+def process_frame(frame, frame_ts, ui, scroll_dev, state):
     new_abs = {}
     trigger_down = False
     trigger_up = False
@@ -180,6 +198,8 @@ def process_frame(frame, ui, scroll_dev, state):
             new_abs[ev.code] = ev.value
 
     prev_x, prev_y = state.last_x, state.last_y
+    prev_t = state.last_t
+    state.last_t = frame_ts
 
     if trigger_down:
         # commit to panning immediately, same as xf86-input-wacom's AC_PANSCROLL
@@ -220,6 +240,14 @@ def process_frame(frame, ui, scroll_dev, state):
     if state.panning and new_abs:
         dx = new_abs[ecodes.ABS_X] - prev_x if prev_x is not None and ecodes.ABS_X in new_abs else 0
         dy = new_abs[ecodes.ABS_Y] - prev_y if prev_y is not None and ecodes.ABS_Y in new_abs else 0
+
+        dt = (frame_ts - prev_t) if (prev_t is not None and frame_ts is not None) else None
+        if dt and dt > 0:
+            velocity = (dx * dx + dy * dy) ** 0.5 / dt  # tablet units/sec
+            if velocity > ACCEL_REF_VELOCITY:
+                accel = min(ACCEL_MAX, (velocity / ACCEL_REF_VELOCITY) ** ACCEL_EXPONENT)
+                dx *= accel
+                dy *= accel
 
         hires_y = (-dy if not INVERT_Y else dy) * HI_RES_UNIT / SENSITIVITY
         state.accum_hires_y += hires_y
@@ -275,7 +303,7 @@ def run_once():
     try:
         for event in real.read_loop():
             if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
-                process_frame(frame, ui, scroll_dev, state)
+                process_frame(frame, event.timestamp(), ui, scroll_dev, state)
                 frame = []
             else:
                 frame.append(event)
