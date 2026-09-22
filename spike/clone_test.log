@@ -1,4 +1,0 @@
-real device: /dev/input/event10 bus: 0003, vendor 056a, product 0374, version 0110
-grabbed real device
-clone device: /dev/input/event259
-released

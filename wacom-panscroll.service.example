@@ -1,0 +1,27 @@
+# Example systemd --user unit for manual installs.
+# `install.sh` generates this automatically with the correct paths - use
+# this file only if you're setting things up by hand instead.
+#
+# 1. Replace /path/to/wacom-panscroll below with where you cloned this repo.
+# 2. Replace /usr/bin/python3 if `command -v python3` gives something else.
+# 3. Copy to ~/.config/systemd/user/wacom-panscroll.service
+# 4. systemctl --user daemon-reload && systemctl --user enable --now wacom-panscroll.service
+
+[Unit]
+Description=Wacom stylus pan-scroll daemon (Wayland xsetwacom PanScroll replacement)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Optional: only needed if auto-detection at daemon startup picks the wrong
+# device (e.g. more than one Wacom tablet). See README for the full list of
+# WACOM_PANSCROLL_* variables. Note the quotes - required because systemd's
+# Environment= splits on whitespace otherwise, and device names have spaces.
+# Environment="WACOM_PANSCROLL_DEVICE=Wacom Intuos S Pen"
+ExecStart=/usr/bin/python3 /path/to/wacom-panscroll/wacom_panscroll.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
