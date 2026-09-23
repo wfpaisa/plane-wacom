@@ -1,0 +1,15 @@
+{
+  "name": "plane-wacom",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "restart": "systemctl --user daemon-reload && systemctl --user restart wacom-panscroll.service",
+    "start": "systemctl --user start wacom-panscroll.service",
+    "stop": "systemctl --user stop wacom-panscroll.service",
+    "status": "systemctl --user status wacom-panscroll.service",
+    "logs": "journalctl --user -u wacom-panscroll.service -f",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  }
+}

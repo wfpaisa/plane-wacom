@@ -47,6 +47,20 @@ How it works:
          second cursor is parked on screen instead of it sitting there for
          the whole session. It's a known cosmetic tradeoff of this approach,
          not something fixable purely at the input-device level.)
+      3. GNOME's screen-edge triggers (Dash to Dock's autohide reveal, hot
+         corners) turned out to never fire from the pen at all, confirmed by
+         reading gnome-shell/Dash to Dock's own source: both the pressure
+         barrier and its dwell fallback key off core-pointer ("mouse")
+         motion tracking specifically, which tablet-tool motion never drives
+         even though it moves the same visible cursor - they're delivered
+         through separate protocol paths (tablet-v2 vs wl_pointer). Normal
+         widget hover/leave (interacting with an already-visible dock, etc.)
+         works fine with the pen since that goes through Clutter's actor
+         picking instead. Fix: mirror the pen's position onto the scroll
+         device whenever it's within EDGE_ZONE of any tablet axis edge (not
+         just on trigger_down) - this dips into the same double-cursor
+         tradeoff above, but only near edges, where it's actually needed for
+         GNOME to notice the pen is there.
   - Normal events are passed through 1:1 to the tablet clone. This part
     matches the real xf86-input-wacom driver's AC_PANSCROLL action exactly
     (verified against its source, src/wcmCommon.c): the moment the trigger
@@ -78,6 +92,10 @@ Config via environment variables (all optional):
   WACOM_PANSCROLL_ACCEL_MAX  cap on the acceleration multiplier (default: 6.0)
   WACOM_PANSCROLL_INVERT_Y   "1" to invert vertical scroll direction
   WACOM_PANSCROLL_HSCROLL    "0" to disable horizontal scroll (vertical only)
+  WACOM_PANSCROLL_EDGE_SYNC  "0" to disable the screen-edge mirroring described
+                              above (default: "1")
+  WACOM_PANSCROLL_EDGE_ZONE  fraction of each tablet axis' range, from either
+                              end, considered "near an edge" (default: 0.05)
 """
 import os
 import sys
@@ -91,11 +109,13 @@ DEVICE_NAME = os.environ.get("WACOM_PANSCROLL_DEVICE", "Wacom Intuos S Pen")
 _BUTTON_MAP = {"stylus": ecodes.BTN_STYLUS, "stylus2": ecodes.BTN_STYLUS2}
 TRIGGER_BUTTON = _BUTTON_MAP[os.environ.get("WACOM_PANSCROLL_BUTTON", "stylus2")]
 
-SENSITIVITY = float(os.environ.get("WACOM_PANSCROLL_SENSITIVITY", "300"))
-ACCEL_EXPONENT = float(os.environ.get("WACOM_PANSCROLL_ACCEL", "1.6"))
-ACCEL_MAX = float(os.environ.get("WACOM_PANSCROLL_ACCEL_MAX", "6.0"))
+SENSITIVITY = float(os.environ.get("WACOM_PANSCROLL_SENSITIVITY", "320"))
+ACCEL_EXPONENT = float(os.environ.get("WACOM_PANSCROLL_ACCEL", "1.6")) # Scroll aceleration
+ACCEL_MAX = float(os.environ.get("WACOM_PANSCROLL_ACCEL_MAX", "4.0")) # Max scroll 
 INVERT_Y = os.environ.get("WACOM_PANSCROLL_INVERT_Y", "0") == "1"
 HSCROLL_ENABLED = os.environ.get("WACOM_PANSCROLL_HSCROLL", "1") != "0"
+EDGE_SYNC_ENABLED = os.environ.get("WACOM_PANSCROLL_EDGE_SYNC", "1") != "0"
+EDGE_ZONE_FRACTION = float(os.environ.get("WACOM_PANSCROLL_EDGE_ZONE", "0.05"))
 
 HI_RES_UNIT = 120  # libinput/kernel convention: 120 hi-res units == 1 legacy notch
 # Tablet units/sec below which motion is left unscaled (1x) - only drags
@@ -172,7 +192,7 @@ def build_scroll_device(real):
 
 
 class PanState:
-    def __init__(self):
+    def __init__(self, abs_x_range=None, abs_y_range=None):
         self.panning = False  # trigger button is held: committed to a pan gesture
         self.last_x = None
         self.last_y = None
@@ -181,12 +201,26 @@ class PanState:
         self.accum_hires_x = 0.0
         self.legacy_carry_y = 0  # hi-res units emitted but not yet folded into a legacy notch
         self.legacy_carry_x = 0
+        self.abs_x_range = abs_x_range  # (min, max) raw ABS_X, for edge detection
+        self.abs_y_range = abs_y_range  # (min, max) raw ABS_Y, for edge detection
+
+
+def _near_edge(value, axis_range, zone):
+    if not axis_range:
+        return False
+    lo, hi = axis_range
+    span = hi - lo
+    if span <= 0:
+        return False
+    margin = span * zone
+    return value <= lo + margin or value >= hi - margin
 
 
 def process_frame(frame, frame_ts, ui, scroll_dev, state):
     new_abs = {}
     trigger_down = False
     trigger_up = False
+    tool_out = False  # pen leaving proximity this frame
 
     for ev in frame:
         if ev.type == ecodes.EV_KEY and ev.code == TRIGGER_BUTTON:
@@ -194,8 +228,18 @@ def process_frame(frame, frame_ts, ui, scroll_dev, state):
                 trigger_down = True
             elif ev.value == 0:
                 trigger_up = True
+        elif ev.type == ecodes.EV_KEY and ev.code == ecodes.BTN_TOOL_PEN and ev.value == 0:
+            tool_out = True
         elif ev.type == ecodes.EV_ABS and ev.code in (ecodes.ABS_X, ecodes.ABS_Y):
             new_abs[ev.code] = ev.value
+
+    if tool_out:
+        # Proximity-out frames often carry a garbage reset position (commonly
+        # ABS_X=0, ABS_Y=0) rather than the pen's actual last location - the
+        # kernel driver's doing, not a real pen movement. Trusting it made the
+        # scroll device's cursor jump to (and get stuck in) the top-left
+        # corner every time the pen was lifted. Drop it.
+        new_abs.clear()
 
     prev_x, prev_y = state.last_x, state.last_y
     prev_t = state.last_t
@@ -215,6 +259,8 @@ def process_frame(frame, frame_ts, ui, scroll_dev, state):
             continue  # motion becomes scroll instead of cursor movement
         if state.panning and ev.type == ecodes.EV_KEY and ev.code == ecodes.BTN_TOUCH:
             continue  # resting the tip while panning must not also fire a left-click-drag
+        if tool_out and ev.type == ecodes.EV_ABS and ev.code in (ecodes.ABS_X, ecodes.ABS_Y):
+            continue  # don't forward the proximity-out garbage position either
         ui.write(ev.type, ev.code, ev.value)
         wrote_any = True
 
@@ -236,6 +282,18 @@ def process_frame(frame, frame_ts, ui, scroll_dev, state):
         scroll_dev.write(ecodes.EV_ABS, ecodes.ABS_X, state.last_x)
         scroll_dev.write(ecodes.EV_ABS, ecodes.ABS_Y, state.last_y)
         scroll_wrote_any = True
+
+    # GNOME's screen-edge triggers (autohide reveal, hot corners) only react
+    # to core-pointer motion, never to the pen directly - see module
+    # docstring point 3. Keep the scroll device's position glued to the pen
+    # whenever it's near any tablet edge, so those triggers actually see it
+    # arrive, without parking a second cursor on screen the rest of the time.
+    if EDGE_SYNC_ENABLED and new_abs and state.last_x is not None and state.last_y is not None:
+        if _near_edge(state.last_x, state.abs_x_range, EDGE_ZONE_FRACTION) or \
+                _near_edge(state.last_y, state.abs_y_range, EDGE_ZONE_FRACTION):
+            scroll_dev.write(ecodes.EV_ABS, ecodes.ABS_X, state.last_x)
+            scroll_dev.write(ecodes.EV_ABS, ecodes.ABS_Y, state.last_y)
+            scroll_wrote_any = True
 
     if state.panning and new_abs:
         dx = new_abs[ecodes.ABS_X] - prev_x if prev_x is not None and ecodes.ABS_X in new_abs else 0
@@ -293,12 +351,15 @@ def run_once():
         return False
 
     log(f"found {DEVICE_NAME} at {real.path}, grabbing")
+    real_abs = dict(real.capabilities(absinfo=True)[ecodes.EV_ABS])
+    abs_x_range = (real_abs[ecodes.ABS_X].min, real_abs[ecodes.ABS_X].max)
+    abs_y_range = (real_abs[ecodes.ABS_Y].min, real_abs[ecodes.ABS_Y].max)
     real.grab()
     ui = build_clone(real)
     scroll_dev = build_scroll_device(real)
     log(f"tablet clone at {ui.device.path}, scroll device at {scroll_dev.device.path}")
 
-    state = PanState()
+    state = PanState(abs_x_range=abs_x_range, abs_y_range=abs_y_range)
     frame = []
     try:
         for event in real.read_loop():
@@ -331,7 +392,8 @@ def main():
     log(
         f"wacom-panscroll starting: device={DEVICE_NAME!r} "
         f"trigger={'BTN_STYLUS2' if TRIGGER_BUTTON == ecodes.BTN_STYLUS2 else 'BTN_STYLUS'} "
-        f"sensitivity={SENSITIVITY} invert_y={INVERT_Y} hscroll={HSCROLL_ENABLED}"
+        f"sensitivity={SENSITIVITY} invert_y={INVERT_Y} hscroll={HSCROLL_ENABLED} "
+        f"edge_sync={EDGE_SYNC_ENABLED} edge_zone={EDGE_ZONE_FRACTION}"
     )
     while True:
         found = run_once()
