@@ -45,7 +45,7 @@ it's the only thing reading it, then re-emits events through two virtual
 
 1. **A tablet clone** — same capabilities as the real pen (pressure, tilt,
    absolute position...), so drawing/cursor behavior is unaffected. While the
-   configured button is held, its motion is *not* forwarded here anymore.
+   configured button is held, its motion is _not_ forwarded here anymore.
 2. **A small "pointer" device**, used only for scroll. This turned out to be
    necessary for two non-obvious reasons (found by trial and error — see the
    comments at the top of [`wacom_panscroll.py`](wacom_panscroll.py) for the
@@ -86,12 +86,13 @@ comments for details if you want to dig further.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/wacom-panscroll.git
+git clone https://github.com/wfpaisa/plane-wacom.git
 cd wacom-panscroll
 ./install.sh
 ```
 
 The script:
+
 1. Checks for `python3` and the `evdev` module (tells you the right install
    command for your distro if it's missing).
 2. Auto-detects your pen device (asks you to pick if it finds more than one).
@@ -119,15 +120,15 @@ systemctl --user daemon-reload
 systemctl --user restart wacom-panscroll.service
 ```
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `WACOM_PANSCROLL_DEVICE` | `Wacom Intuos S Pen` | Exact device name to grab (`install.sh` sets this for you) |
-| `WACOM_PANSCROLL_BUTTON` | `stylus2` | Which side button triggers panning: `stylus` (lower) or `stylus2` (upper) |
-| `WACOM_PANSCROLL_SENSITIVITY` | `300` | Tablet units of motion per scroll "notch". Lower = faster/more sensitive |
-| `WACOM_PANSCROLL_ACCEL` | `1.6` | Exponent of the speed-based acceleration curve. `1.0` = linear, no boost |
-| `WACOM_PANSCROLL_ACCEL_MAX` | `6.0` | Cap on the acceleration multiplier, so a very fast flick doesn't fling you across a whole document |
-| `WACOM_PANSCROLL_INVERT_Y` | `0` | `1` to invert vertical scroll direction |
-| `WACOM_PANSCROLL_HSCROLL` | `1` | `0` to disable horizontal scroll (vertical only) |
+| Variable                      | Default              | Meaning                                                                                            |
+| ----------------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
+| `WACOM_PANSCROLL_DEVICE`      | `Wacom Intuos S Pen` | Exact device name to grab (`install.sh` sets this for you)                                         |
+| `WACOM_PANSCROLL_BUTTON`      | `stylus2`            | Which side button triggers panning: `stylus` (lower) or `stylus2` (upper)                          |
+| `WACOM_PANSCROLL_SENSITIVITY` | `300`                | Tablet units of motion per scroll "notch". Lower = faster/more sensitive                           |
+| `WACOM_PANSCROLL_ACCEL`       | `1.6`                | Exponent of the speed-based acceleration curve. `1.0` = linear, no boost                           |
+| `WACOM_PANSCROLL_ACCEL_MAX`   | `6.0`                | Cap on the acceleration multiplier, so a very fast flick doesn't fling you across a whole document |
+| `WACOM_PANSCROLL_INVERT_Y`    | `0`                  | `1` to invert vertical scroll direction                                                            |
+| `WACOM_PANSCROLL_HSCROLL`     | `1`                  | `0` to disable horizontal scroll (vertical only)                                                   |
 
 ## Verifying it works
 
